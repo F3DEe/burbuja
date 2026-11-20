@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Burbuja de aliento</title>
+<style>
+/* VOICE: calma, contemplativa, casi silenciosa
+   IDEA: una pompa de jabón suspendida en agua nocturna
+   PICTURE: la burbuja a pantalla completa, iridiscente
+   COLOUR and TYPE: azul abisal, iridiscencia; Inter ligera
+   LAYOUT: lienzo completo, controles mínimos abajo */
+:root{color-scheme:dark;--ink:#e8f1ff;--dim:#8fa3c4;--accent:#9fe8ff}
+*{box-sizing:border-box;margin:0}
+[hidden]{display:none!important}
+html,body{height:100%;background:#050b18;color:var(--ink);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+#hud{position:fixed;left:0;right:0;bottom:0;padding:14px 18px calc(16px + env(safe-area-inset-bottom));display:grid;gap:10px;background:linear-gradient(transparent,#050b18cc 40%)}
+#estado{font-size:14px;color:var(--dim);text-align:center;min-height:20px}
+.fila{display:flex;align-items:center;gap:12px}
+.medidor{flex:1;height:8px;border-radius:4px;background:#ffffff14;overflow:hidden;position:relative}
+#nivel{height:100%;width:0;background:linear-gradient(90deg,#4fc3f7,#b388ff,#ff8ab4);border-radius:4px}
+#umbral{position:absolute;top:-3px;bottom:-3px;width:2px;background:#fff9;left:30%}
+label{font-size:13px;color:var(--dim);white-space:nowrap}
+input[type=range]{flex:1;accent-color:#9fe8ff;height:44px}
+button{font:inherit;color:var(--ink);background:#ffffff14;border:1px solid #ffffff2a;border-radius:22px;min-height:44px;padding:0 18px;cursor:pointer}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.colores{justify-content:center;flex-wrap:wrap;gap:8px}
+.sw{width:36px;height:36px;min-height:36px;padding:0;border-radius:50%;border:2px solid #ffffff30}
+.sw[aria-checked=true]{border-color:#fff;box-shadow:0 0 0 3px #ffffff40}
+.sw.arco{background:conic-gradient(#ff8ab4,#ffd36b,#8dffb0,#7fd8ff,#b388ff,#ff8ab4)}
+.sw.libre{position:relative;overflow:hidden;background:conic-gradient(#fff,#888,#fff)}
+.sw.libre input{position:absolute;inset:-8px;width:60px;height:60px;opacity:0;cursor:pointer}
+#contador{font-size:13px;color:var(--dim);white-space:nowrap}
+#inicio{position:fixed;inset:0;display:grid;place-content:center;gap:18px;text-align:center;padding:24px;background:#050b18e6;z-index:5}
+#inicio h1{font-weight:300;font-size:clamp(30px,8vw,46px);line-height:1.05}
+#inicio p{color:var(--dim);max-width:34ch;margin:0 auto}
+#inicio button{background:#9fe8ff;color:#06203a;border:0;font-weight:600;font-size:17px;min-height:52px;padding:0 30px;justify-self:center}
+#aviso{color:#ffb4c8;font-size:14px;max-width:36ch;margin:0 auto}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud" hidden>
+  <div id="estado">Calibrando el silencio…</div>
+  <div class="fila">
+    <div class="medidor"><div id="nivel"></div><div id="umbral"></div></div>
+    <span id="contador">0 burbujas</span>
+  </div>
+  <div class="fila colores" id="colores" role="radiogroup" aria-label="Color de la burbuja"></div>
+  <div class="fila">
+    <label for="sens">Sensibilidad</label>
+    <input id="sens" type="range" min="1" max="10" step="0.5" value="5">
+    <button id="recal">Recalibrar</button>
+  </div>
+</div>
+
+<div id="inicio">
+  <h1>Burbuja de aliento</h1>
+  <p>Sopla por el tubo: la burbuja crece mientras exhalas y estalla cuando terminas. Después nace otra.</p>
+  <button id="empezar">Empezar</button>
+  <p id="aviso" hidden></p>
+</div>
+
+<script>
+{
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+let W = 0, H = 0, DPR = 1;
+const resize = () => {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+};
+addEventListener('resize', resize); resize();
+
+/* ---------- Audio ---------- */
+let analyser = null, buf = null;
+let ruido = 0.01, calibrando = 0, sumaCal = 0, nCal = 0;
+let nivel = 0, tocando = false;
+
+async function iniciarMicro() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+  });
+  const ac = new (window.AudioContext || window.webkitAudioContext)();
+  await ac.resume();
+  const src = ac.createMediaStreamSource(stream);
+  analyser = ac.createAnalyser();
+  analyser.fftSize = 1024;
+  src.connect(analyser);
+  buf = new Float32Array(analyser.fftSize);
+  recalibrar();
+}
+function recalibrar() { calibrando = 1.5; sumaCal = 0; nCal = 0; }
+
+function leerNivel(dt) {
+  let rms = 0;
+  if (analyser) {
+    analyser.getFloatTimeDomainData(buf);
+    let s = 0;
+    for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+    rms = Math.sqrt(s / buf.length);
+    if (calibrando > 0) {
+      calibrando -= dt; sumaCal += rms; nCal++;
+      if (calibrando <= 0) ruido = Math.max(sumaCal / nCal, 0.002);
+    }
+  }
+  // sensibilidad alta = umbral más bajo
+  const sens = +$('sens').value;
+  const umbral = ruido * (1.6 + (10 - sens) * 0.9) + 0.004;
+  const fuerza = tocando ? 0.8 : Math.max(0, (rms - umbral) / (umbral * 4));
+  nivel += (fuerza - nivel) * Math.min(1, dt * 12);
+  // medidor: escala log para ver bien soplidos suaves
+  const toPct = v => Math.min(100, Math.max(0, (Math.log10(v + 1e-5) + 3) / 2.6 * 100));
+  $('nivel').style.width = (tocando ? 70 : toPct(rms)) + '%';
+  $('umbral').style.left = toPct(umbral) + '%';
+  return nivel;
+}
+
+/* ---------- Burbuja ---------- */
+const burbuja = { r: 0, objetivo: 14, viva: true, soplando: false, silencio: 0, nace: 0, hue: 200 };
+let particulas = [], ondas = [], espera = 0, cuenta = 0, t = 0;
+const motas = Array.from({ length: 50 }, () => ({ x: Math.random(), y: Math.random(), v: 0.004 + Math.random() * 0.01, s: 0.5 + Math.random() * 1.5 }));
+
+/* ---------- Color elegido ---------- */
+let colorFijo = null; // null = arcoíris (color distinto en cada burbuja)
+const COLORES = [['Arcoíris', null], ['Azul', 205], ['Turquesa', 172], ['Verde', 135], ['Oro', 45], ['Coral', 12], ['Rosa', 330], ['Violeta', 270]];
+const hexAHue = hex => {
+  const n = parseInt(hex.slice(1), 16), r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  if (!d) return 200;
+  let h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return (h * 60 + 360) % 360;
+};
+function elegir(btn, hue) {
+  colorFijo = hue;
+  for (const b of document.querySelectorAll('.sw')) b.setAttribute('aria-checked', b === btn);
+  burbuja.hue = hue ?? burbuja.hue;
+}
+$('colores').innerHTML = COLORES.map(([n, h], i) =>
+  `<button class="sw${h === null ? ' arco' : ''}" role="radio" aria-checked="${i === 0}" aria-label="${n}" data-h="${h ?? ''}" style="${h === null ? '' : `background:hsl(${h},85%,65%)`}"></button>`
+).join('') + `<span class="sw libre" role="radio" aria-checked="false" aria-label="Color libre"><input id="libre" type="color" value="#7fd8ff" aria-label="Elegir otro color"></span>`;
+for (const b of document.querySelectorAll('button.sw'))
+  b.addEventListener('click', () => elegir(b, b.dataset.h === '' ? null : +b.dataset.h));
+$('libre').addEventListener('input', e => {
+  const sw = e.target.parentElement; sw.style.background = e.target.value;
+  elegir(sw, hexAHue(e.target.value));
+});
+
+function nuevaBurbuja() {
+  Object.assign(burbuja, { r: 0, objetivo: 14, viva: true, soplando: false, silencio: 0, nace: 0, hue: colorFijo ?? Math.random() * 360 });
+}
+
+function explotar() {
+  const cx = W / 2, cy = H * 0.44, r = burbuja.r;
+  for (let i = 0; i < 70; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 260 * (0.4 + r / 200);
+    particulas.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, vida: 1, h: (burbuja.hue + (colorFijo === null ? i * 9 : (i % 7) * 4)) % 360, s: 1 + Math.random() * 2.5 });
+  }
+  ondas.push({ r, vida: 1 });
+  burbuja.viva = false; espera = 0.7;
+  cuenta++; $('contador').textContent = cuenta + (cuenta === 1 ? ' burbuja' : ' burbujas');
+}
+
+function actualizar(dt) {
+  const f = leerNivel(dt);
+  const maxR = Math.min(W, H) * 0.42;
+  if (burbuja.viva) {
+    burbuja.nace = Math.min(1, burbuja.nace + dt * 1.5);
+    if (f > 0.05) {
+      burbuja.soplando = true; burbuja.silencio = 0;
+      burbuja.objetivo += f * dt * 140 * (1 - burbuja.objetivo / (maxR * 1.15));
+      if (colorFijo === null) burbuja.hue = (burbuja.hue + dt * 40 * f) % 360;
+      else burbuja.hue = colorFijo + Math.sin(t * 1.5) * 8; // leve brillo, mismo color
+    } else if (burbuja.soplando) {
+      burbuja.silencio += dt;
+      if (burbuja.silencio > 0.3) explotar();   // fin de la exhalación
+    }
+    if (burbuja.objetivo >= maxR) explotar();
+    burbuja.r += (burbuja.objetivo - burbuja.r) * Math.min(1, dt * 6);
+    $('estado').textContent = calibrando > 0 ? 'Calibrando el silencio… no soples'
+      : burbuja.soplando ? 'Exhala despacio…' : 'Sopla para inflar la burbuja';
+  } else {
+    espera -= dt;
+    if (espera <= 0) nuevaBurbuja();
+  }
+  particulas = particulas.filter(p => (p.vida -= dt * 1.1) > 0);
+  for (const p of particulas) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.96; p.vy = p.vy * 0.96 + 40 * dt; }
+  ondas = ondas.filter(o => (o.vida -= dt * 2) > 0);
+  for (const o of ondas) o.r += dt * 260;
+}
+
+/* ---------- Dibujo ---------- */
+function fondo() {
+  const g = ctx.createRadialGradient(W / 2, H * 0.44, 0, W / 2, H * 0.44, Math.max(W, H) * 0.8);
+  const brillo = Math.min(1, nivel) * 0.35;
+  g.addColorStop(0, `hsl(${burbuja.hue},55%,${10 + brillo * 30}%)`);
+  g.addColorStop(0.55, '#07142a');
+  g.addColorStop(1, '#03070f');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#bfe6ff';
+  for (const m of motas) {
+    m.y -= m.v * 0.016; if (m.y < 0) { m.y = 1; m.x = Math.random(); }
+    ctx.globalAlpha = 0.15 + 0.15 * Math.sin(t + m.x * 9);
+    ctx.beginPath(); ctx.arc(m.x * W, m.y * H, m.s, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function formaBurbuja(cx, cy, r) {
+  ctx.beginPath();
+  const amp = 0.012 + nivel * 0.025;
+  for (let i = 0; i <= 64; i++) {
+    const a = i / 64 * Math.PI * 2;
+    const k = 1 + amp * Math.sin(3 * a + t * 2.1) + amp * 0.6 * Math.sin(5 * a - t * 1.3);
+    const x = cx + Math.cos(a) * r * k, y = cy + Math.sin(a) * r * k;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function dibujarBurbuja() {
+  if (!burbuja.viva) return;
+  const cx = W / 2, cy = H * 0.44 + Math.sin(t * 0.8) * 6;
+  const r = Math.max(2, burbuja.r * (0.3 + 0.7 * burbuja.nace));
+  const h = burbuja.hue;
+  // halo de luz que crece con el soplido
+  const halo = ctx.createRadialGradient(cx, cy, r * 0.8, cx, cy, r * (1.6 + nivel));
+  halo.addColorStop(0, `hsla(${h},90%,70%,${0.12 + nivel * 0.35})`);
+  halo.addColorStop(1, 'hsla(0,0%,0%,0)');
+  ctx.fillStyle = halo; ctx.fillRect(0, 0, W, H);
+  // cuerpo casi transparente
+  formaBurbuja(cx, cy, r);
+  const cuerpo = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.1, cx, cy, r);
+  cuerpo.addColorStop(0, 'hsla(0,0%,100%,0.02)');
+  cuerpo.addColorStop(0.75, `hsla(${h + 40},80%,70%,0.06)`);
+  cuerpo.addColorStop(1, `hsla(${h + 120},90%,75%,0.22)`);
+  ctx.fillStyle = cuerpo; ctx.fill();
+  // borde iridiscente que gira
+  ctx.lineWidth = Math.max(1.5, r * 0.045);
+  if (ctx.createConicGradient) {
+    const c = ctx.createConicGradient(t * 0.6, cx, cy);
+    const paso = colorFijo === null ? 60 : 10, tramo = [0, 1, 2, 3, 2, 1, 0];
+    for (let i = 0; i <= 6; i++) c.addColorStop(i / 6, `hsla(${(h + tramo[i] * paso + 360) % 360},95%,${68 + tramo[i] * 4}%,${0.45 + nivel * 0.4})`);
+    ctx.strokeStyle = c;
+  } else ctx.strokeStyle = `hsla(${h},90%,75%,0.6)`;
+  ctx.shadowColor = `hsl(${h},100%,70%)`; ctx.shadowBlur = 10 + nivel * 30;
+  ctx.stroke(); ctx.shadowBlur = 0;
+  // reflejos
+  ctx.save(); ctx.translate(cx - r * 0.38, cy - r * 0.42); ctx.rotate(-0.6);
+  const br = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 0.28);
+  br.addColorStop(0, 'rgba(255,255,255,0.85)'); br.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = br; ctx.scale(1, 0.55); ctx.beginPath(); ctx.arc(0, 0, r * 0.28, 0, 7); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.beginPath(); ctx.arc(cx + r * 0.45, cy + r * 0.5, r * 0.05, 0, 7); ctx.fill();
+}
+
+function dibujarExplosion() {
+  for (const o of ondas) {
+    ctx.strokeStyle = `rgba(220,240,255,${o.vida * 0.5})`; ctx.lineWidth = 2 * o.vida;
+    ctx.beginPath(); ctx.arc(W / 2, H * 0.44, o.r, 0, 7); ctx.stroke();
+  }
+  for (const p of particulas) {
+    ctx.fillStyle = `hsla(${p.h},95%,80%,${p.vida})`;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.s * p.vida, 0, 7); ctx.fill();
+  }
+}
+
+let ultimo = performance.now();
+function bucle(ahora) {
+  const dt = Math.min(0.05, (ahora - ultimo) / 1000); ultimo = ahora; t += dt;
+  actualizar(dt);
+  fondo(); dibujarBurbuja(); dibujarExplosion();
+  requestAnimationFrame(bucle);
+}
+
+/* ---------- Controles ---------- */
+$('empezar').addEventListener('click', async () => {
+  const av = $('aviso'); av.hidden = false;
+  av.textContent = 'Pidiendo el micrófono…';
+  try {
+    if (!window.isSecureContext || !navigator.mediaDevices) throw { name: 'página no segura: hay que abrirla desde https' };
+    await Promise.race([iniciarMicro(), new Promise((_, no) => setTimeout(() => no({ name: 'el navegador no responde a la petición de micrófono' }), 6000))]);
+  } catch (e) {
+    av.textContent = 'No se pudo usar el micrófono (' + (e.name || 'error') + '). Dirección: ' + location.protocol + ' · Puedes probar igualmente manteniendo el dedo pulsado sobre la pantalla.';
+    $('empezar').textContent = 'Seguir sin micrófono';
+    $('empezar').onclick = () => { $('inicio').hidden = true; $('hud').hidden = false; };
+    return;
+  }
+  $('inicio').hidden = true; $('hud').hidden = false;
+});
+$('recal').addEventListener('click', recalibrar);
+cv.addEventListener('pointerdown', () => tocando = true);
+addEventListener('pointerup', () => tocando = false);
+addEventListener('pointercancel', () => tocando = false);
+requestAnimationFrame(bucle);
+}
+</script>
+</body>
+</html>
